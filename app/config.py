@@ -4,15 +4,15 @@ Loads environment variables and provides app settings
 """
 
 from pydantic_settings import BaseSettings
-from typing import List
+from typing import List, Optional
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
     
     # Application
-    APP_NAME: str = "QKREW"
-    APP_VERSION: str = "1.0.0"
+    APP_NAME: str = "QKREW V4"
+    APP_VERSION: str = "4.0.0"
     DEBUG: bool = True
     ENVIRONMENT: str = "development"
     
@@ -24,20 +24,28 @@ class Settings(BaseSettings):
     # JWT
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15  # 15 minutes for security
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     
-    # CORS
-    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001,http://localhost:5173"
+    # CORS - Production origins (comma-separated)
+    # Local development origins are always included in main.py
+    ALLOWED_ORIGINS: str = ""
     
     # OpenRouter API (for AI features - Chatbot, ESP Simulation, Leave Conflicts)
-    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_API_KEY: Optional[str] = None
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     
     @property
-    def cors_origins_list(self) -> List[str]:
-        """Convert CORS_ORIGINS string to list"""
-        return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+    def allowed_origins_list(self) -> List[str]:
+        """Convert ALLOWED_ORIGINS string to list"""
+        if not self.ALLOWED_ORIGINS:
+            return []
+        return [origin.strip() for origin in self.ALLOWED_ORIGINS.split(",") if origin.strip()]
+    
+    @property
+    def is_production(self) -> bool:
+        """Check if running in production environment"""
+        return self.ENVIRONMENT.lower() in ["production", "prod"]
     
     class Config:
         env_file = ".env"
@@ -46,3 +54,4 @@ class Settings(BaseSettings):
 
 # Global settings instance
 settings = Settings()
+
