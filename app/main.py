@@ -90,6 +90,10 @@ app.add_middleware(
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     """Log all incoming requests and responses"""
+    # Skip logging for OPTIONS requests (CORS preflight)
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    
     start_time = time.time()
     
     # Log request
