@@ -41,21 +41,42 @@ app = FastAPI(
 )
 
 # ============================================================================
-# CORS MIDDLEWARE - Explicit origins for credentials support
+# CORS MIDDLEWARE - Support for local development and production deployment
 # ============================================================================
+
+import os
+
+# Get allowed origins from environment variable or use defaults
+ALLOWED_ORIGINS_ENV = os.getenv("ALLOWED_ORIGINS", "")
+allowed_origins = []
+
+# Add production origins from environment variable (comma-separated)
+if ALLOWED_ORIGINS_ENV:
+    production_origins = [origin.strip() for origin in ALLOWED_ORIGINS_ENV.split(",") if origin.strip()]
+    allowed_origins.extend(production_origins)
+
+# Always include local development origins
+local_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:3002",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:8000",
+]
+allowed_origins.extend(local_origins)
+
+# Remove duplicates while preserving order
+allowed_origins = list(dict.fromkeys(allowed_origins))
+
+print(f"🌐 CORS Allowed Origins: {allowed_origins}")
 
 # When using credentials, cannot use wildcard "*"
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://localhost:3002",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-        "http://127.0.0.1:8000",
-    ],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
