@@ -3,9 +3,9 @@ uvicorn[standard]==0.27.0
 pydantic==2.5.3
 pydantic-settings==2.1.0
 
-# Supabase
-supabase==2.3.0
-postgrest-py==0.13.0
+# Supabase (using compatible versions)
+supabase>=2.0.0
+postgrest>=0.10.6
 
 # Authentication
 python-jose[cryptography]==3.3.0
