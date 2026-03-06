@@ -24,6 +24,8 @@ class EmployeeImpact(BaseModel):
     available_capacity: float
     skill_match_score: float
     productivity_score: float
+    matching_project_skills: List[str] = []
+    missing_project_skills: List[str] = []
 
 class SimulationResult(BaseModel):
     current_state: dict
@@ -60,170 +62,197 @@ async def simulate_staffing(
     
     project = project_response.data
     
-    # 2. Get current team members
+    # ── Skill normalization helper ─────────────────────────────────────────
+    def norm(s: str) -> str:
+        """Lowercase + strip so 'Team Leadership' == 'team leadership'."""
+        return s.lower().strip().replace("-", " ").replace("_", " ")
+
+    required_skills: list = project.get("required_skills") or []
+    req_norm = [norm(s) for s in required_skills]   # normalized required list
+
+    # ── 2. Current team ────────────────────────────────────────────────────
     current_members = project.get("project_members", [])
     current_team_size = len(current_members)
-    
-    # 3. Calculate current state
-    current_skills = []
+
+    current_skills_raw: list = []
     current_total_experience = 0
     current_total_workload = 0
-    
+
     for member in current_members:
         user = member.get("users", {})
         if user:
-            current_skills.extend(user.get("skills", []))
-            current_total_experience += user.get("experience_years", 0)
-            current_total_workload += user.get("current_workload_percent", 0)
-    
-    current_skills = list(set(current_skills))  # Unique skills
+            current_skills_raw.extend(user.get("skills") or [])
+            current_total_experience += user.get("experience_years") or 0
+            current_total_workload  += user.get("current_workload_percent") or 0
+
+    current_skills_raw = list(set(current_skills_raw))
+    cur_norm = [norm(s) for s in current_skills_raw]
+
     current_avg_experience = current_total_experience / max(current_team_size, 1)
-    current_avg_workload = current_total_workload / max(current_team_size, 1)
-    
-    # Calculate current skill coverage
-    required_skills = project.get("required_skills", [])
-    current_skill_coverage = 0
-    if required_skills:
-        matched_skills = [s for s in required_skills if s in current_skills]
-        current_skill_coverage = (len(matched_skills) / len(required_skills)) * 100
+    current_avg_workload   = current_total_workload   / max(current_team_size, 1)
+
+    # Skill coverage (normalised comparison)
+    if req_norm:
+        cur_matched = [s for s in req_norm if s in cur_norm]
+        current_skill_coverage = (len(cur_matched) / len(req_norm)) * 100
     else:
-        current_skill_coverage = 100
-    
-    # 4. Get proposed employees
+        current_skill_coverage = 100.0
+
+    # ── 3. Proposed employees ──────────────────────────────────────────────
     employee_response = db.table("users").select("*").in_(
         "id", request.employee_ids
     ).execute()
-    
+
     if not employee_response.data:
         raise HTTPException(status_code=404, detail="Employees not found")
-    
-    proposed_employees = employee_response.data
-    
-    # 5. Calculate impact for each employee
-    employee_contributions = []
-    new_skills = []
-    new_total_experience = current_total_experience
-    new_total_capacity = 0
-    
-    
-    for emp in proposed_employees:
-        emp_skills = emp.get("skills") or []  # Handle None case
-        emp_experience = emp.get("experience_years") or 0
-        emp_workload = emp.get("current_workload_percent") or 0
-        emp_capacity = emp.get("weekly_capacity") or 40
-        
-        # Calculate available capacity
-        available_capacity = 100 - emp_workload
-        
-        # Calculate skill match score
-        if required_skills and len(required_skills) > 0:
-            matched = [s for s in required_skills if s in emp_skills]
-            skill_match_score = (len(matched) / len(required_skills)) * 100
-        else:
-            skill_match_score = 50  # Default if no required skills
-        
-        # Calculate productivity score (based on experience and availability)
-        experience_factor = min(emp_experience / 10, 1.0)  # Max at 10 years
-        availability_factor = available_capacity / 100
-        productivity_score = (experience_factor * 0.5 + availability_factor * 0.5) * 100
 
-        
+    proposed_employees = employee_response.data
+
+    # ── 4. Per-employee impact + skill gap ────────────────────────────────
+    employee_contributions = []
+    new_skills_raw: list = list(current_skills_raw)
+    new_total_experience = current_total_experience
+
+    for emp in proposed_employees:
+        emp_skills_raw  = emp.get("skills") or []
+        emp_experience  = emp.get("experience_years") or 0
+        emp_workload    = emp.get("current_workload_percent") or 0
+        available_capacity = max(0, 100 - emp_workload)
+        emp_norm = [norm(s) for s in emp_skills_raw]
+
+        # Skill match vs project requirements (normalised)
+        if req_norm:
+            matched_req = [required_skills[i] for i, s in enumerate(req_norm) if s in emp_norm]
+            missing_req = [required_skills[i] for i, s in enumerate(req_norm) if s not in emp_norm]
+            skill_match_score = (len(matched_req) / len(req_norm)) * 100
+        else:
+            matched_req = []
+            missing_req = []
+            skill_match_score = 50.0
+
+        # Productivity: experience (50%) + availability (50%)
+        exp_factor  = min(emp_experience / 10.0, 1.0)
+        avail_factor = available_capacity / 100.0
+        productivity_score = (exp_factor * 0.5 + avail_factor * 0.5) * 100
+
         employee_contributions.append(EmployeeImpact(
             id=emp["id"],
             name=emp["name"],
             experience_years=emp_experience,
-            skills=emp_skills,
+            skills=emp_skills_raw,
             current_workload_percent=emp_workload,
             available_capacity=available_capacity,
-            skill_match_score=skill_match_score,
-            productivity_score=productivity_score
+            skill_match_score=round(skill_match_score, 1),
+            productivity_score=round(productivity_score, 1),
+            matching_project_skills=matched_req,
+            missing_project_skills=missing_req,
         ))
-        
-        # Accumulate new skills
-        new_skills.extend(emp_skills)
+
+        new_skills_raw.extend(emp_skills_raw)
         new_total_experience += emp_experience
-        new_total_capacity += available_capacity
-    
-    # 6. Calculate projected state
-    new_team_size = current_team_size + len(proposed_employees)
-    new_skills = list(set(current_skills + new_skills))
+
+    # ── 5. Projected state ─────────────────────────────────────────────────
+    new_team_size  = current_team_size + len(proposed_employees)
+    new_skills_raw = list(set(new_skills_raw))
+    new_norm       = [norm(s) for s in new_skills_raw]
     new_avg_experience = new_total_experience / new_team_size
-    
-    # Calculate new skill coverage
-    if required_skills:
-        matched_skills = [s for s in required_skills if s in new_skills]
-        new_skill_coverage = (len(matched_skills) / len(required_skills)) * 100
+
+    if req_norm:
+        new_matched = [s for s in req_norm if s in new_norm]
+        new_skill_coverage = (len(new_matched) / len(req_norm)) * 100
     else:
-        new_skill_coverage = 100
-    
-    # Calculate productivity boost
-    avg_productivity = sum(e.productivity_score for e in employee_contributions) / len(employee_contributions)
+        new_skill_coverage = 100.0
+
+    # Remaining skill gaps after adding new team
+    skill_gaps_remaining = [required_skills[i] for i, s in enumerate(req_norm) if s not in new_norm]
+
+    avg_productivity    = sum(e.productivity_score for e in employee_contributions) / len(employee_contributions)
     skill_coverage_boost = new_skill_coverage - current_skill_coverage
-    
-    # Estimate progress boost (based on team size, skills, and productivity)
-    team_size_factor = (new_team_size - current_team_size) / max(current_team_size, 1)
-    skill_factor = skill_coverage_boost / 100
-    productivity_factor = avg_productivity / 100
-    
-    progress_boost = min(40, (team_size_factor * 15) + (skill_factor * 20) + (productivity_factor * 10))
-    
-    current_progress = project.get("progress", 0)
-    new_progress = min(100, current_progress + progress_boost)
-    
-    # Calculate timeline impact
-    current_velocity = current_team_size * (current_skill_coverage / 100) * (current_avg_experience / 10)
-    new_velocity = new_team_size * (new_skill_coverage / 100) * (new_avg_experience / 10)
-    
-    if current_velocity > 0:
-        velocity_increase = ((new_velocity - current_velocity) / current_velocity) * 100
+
+    # ── 6. Velocity model (floors prevent collapse to zero) ────────────────
+    # Velocity = team_size × skill_factor × experience_factor
+    # SKILL_FLOOR: even a fully-mismatched team still executes at 20% efficiency
+    # EXP_FLOOR:   even juniors contribute at 30% of a 10-yr senior
+    SKILL_FLOOR = 0.20
+    EXP_FLOOR   = 0.30
+
+    cur_skill_f = max(current_skill_coverage / 100.0, SKILL_FLOOR)
+    cur_exp_f   = max(current_avg_experience  / 10.0,  EXP_FLOOR)
+    cur_velocity = max(current_team_size, 1) * cur_skill_f * cur_exp_f
+
+    new_skill_f = max(new_skill_coverage / 100.0, SKILL_FLOOR)
+    new_exp_f   = max(new_avg_experience  / 10.0,  EXP_FLOOR)
+    new_velocity = new_team_size * new_skill_f * new_exp_f
+
+    # Guarantee new_velocity > cur_velocity (more people → always faster)
+    new_velocity = max(new_velocity, cur_velocity * 1.05)
+
+    velocity_increase = round(((new_velocity - cur_velocity) / cur_velocity) * 100, 1)
+
+    # ── 7. Timeline ────────────────────────────────────────────────────────
+    current_progress = project.get("progress") or 0
+    remaining_work   = max(0, 100 - current_progress)
+    MAX_MONTHS = 24
+    BASE = 12.0   # a single-unit velocity completes 100% work in 12 months
+
+    if remaining_work > 0:
+        raw_cur = (remaining_work / 100.0) * BASE / cur_velocity
+        raw_new = (remaining_work / 100.0) * BASE / new_velocity
+        current_months = min(round(raw_cur, 1), MAX_MONTHS)
+        # new_months must always be strictly less than current_months
+        new_months = min(round(raw_new, 1), current_months - 0.5)
+        new_months = max(new_months, 0.5)          # at least 2 weeks
+        months_saved = round(current_months - new_months, 1)
     else:
-        velocity_increase = 100
-    
-    # Estimate months saved (rough calculation)
-    remaining_work = 100 - current_progress
-    if remaining_work > 0 and current_velocity > 0:
-        current_months = (remaining_work / current_velocity) * 2  # Rough estimate
-        new_months = (remaining_work / new_velocity) * 2
-        months_saved = max(0, current_months - new_months)
-    else:
-        current_months = 6
-        new_months = 4
-        months_saved = 2
-    
-    # Calculate workload distribution
-    new_avg_workload = (current_total_workload + sum(e.current_workload_percent for e in employee_contributions)) / new_team_size
-    
-    # 7. Build response
+        current_months, new_months, months_saved = 0.0, 0.0, 0.0
+
+    # ── 8. Progress boost ──────────────────────────────────────────────────
+    team_size_factor  = (new_team_size - current_team_size) / max(current_team_size, 1)
+    skill_factor      = skill_coverage_boost / 100.0
+    productivity_factor = avg_productivity / 100.0
+    progress_boost = min(40.0, (team_size_factor * 15) + (skill_factor * 20) + (productivity_factor * 10))
+    new_progress   = min(100, current_progress + progress_boost)
+
+    # ── 9. Workload ────────────────────────────────────────────────────────
+    new_avg_workload = (
+        current_total_workload +
+        sum(e.current_workload_percent for e in employee_contributions)
+    ) / new_team_size
+
+    # ── 10. Build response ─────────────────────────────────────────────────
     return SimulationResult(
         current_state={
-            "team_size": current_team_size,
-            "progress": current_progress,
-            "skill_coverage": current_skill_coverage,
-            "avg_experience": current_avg_experience,
-            "avg_workload": current_avg_workload,
-            "skills": current_skills,
-            "estimated_months": round(current_months, 1)
+            "team_size":        current_team_size,
+            "progress":         current_progress,
+            "skill_coverage":   round(current_skill_coverage, 1),
+            "avg_experience":   round(current_avg_experience, 1),
+            "avg_workload":     round(current_avg_workload, 1),
+            "skills":           current_skills_raw,
+            "estimated_months": current_months,
         },
         projected_state={
-            "team_size": new_team_size,
-            "progress": new_progress,
-            "skill_coverage": new_skill_coverage,
-            "avg_experience": new_avg_experience,
-            "avg_workload": new_avg_workload,
-            "skills": new_skills,
-            "estimated_months": round(new_months, 1)
+            "team_size":        new_team_size,
+            "progress":         round(new_progress, 1),
+            "skill_coverage":   round(new_skill_coverage, 1),
+            "avg_experience":   round(new_avg_experience, 1),
+            "avg_workload":     round(new_avg_workload, 1),
+            "skills":           new_skills_raw,
+            "estimated_months": new_months,
         },
         impact={
-            "progress_boost": round(progress_boost, 1),
+            "progress_boost":       round(progress_boost, 1),
             "skill_coverage_boost": round(skill_coverage_boost, 1),
-            "velocity_increase": round(velocity_increase, 1),
-            "months_saved": round(months_saved, 1),
-            "new_skills_added": [s for s in new_skills if s not in current_skills],
-            "avg_productivity": round(avg_productivity, 1),
-            "workload_reduction": round(current_avg_workload - new_avg_workload, 1)
+            "velocity_increase":    velocity_increase,
+            "months_saved":         months_saved,
+            "new_skills_added":     [s for s in new_skills_raw if norm(s) not in cur_norm],
+            "avg_productivity":     round(avg_productivity, 1),
+            "workload_reduction":   round(current_avg_workload - new_avg_workload, 1),
+            "skill_gaps_remaining": skill_gaps_remaining,
+            "required_skills":      required_skills,
         },
         employee_contributions=employee_contributions
     )
+
 
 
 # ============================================================================
